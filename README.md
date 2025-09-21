@@ -1,4 +1,3 @@
-# Warnings Analyzer — Web (Streamlit)
-See README_cloud.txt in previous message. Quick start:
-pip install -r requirements_streamlit.txt
-streamlit run streamlit_warnings_analyzer.py
+# Ready for Streamlit Cloud
+
+Use `streamlit_warnings_analyzer.py` as the app file.

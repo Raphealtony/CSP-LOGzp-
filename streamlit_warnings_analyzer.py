@@ -1,40 +1,112 @@
+
 import io
+import os
 import zipfile
 from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 
 st.set_page_config(page_title="Warnings Analyzer (Web)", layout="wide")
 
 APP_TITLE = "Warnings Analyzer — Web (Minute-Level, Subsystem, Time Range)"
 DEFAULT_TIME_FMT = "%Y-%m-%d %H:%M:%S"
 
-def setup_zh_font():
-    """Try to pick an available CJK font to avoid missing glyph warnings in matplotlib."""
+def use_font(font_path: str):
+    """Register a font file and set it as default for matplotlib."""
+    try:
+        font_manager.fontManager.addfont(font_path)
+        prop = font_manager.FontProperties(fname=font_path)
+        family_name = prop.get_name()
+        plt.rcParams["font.sans-serif"] = [family_name]
+        plt.rcParams["axes.unicode_minus"] = False
+        return family_name
+    except Exception as e:
+        return None
+
+def load_cjk_font():
+    """Try 3 strategies (in order):
+    1) fonts/ directory in repo (e.g., fonts/NotoSansTC-Regular.otf)
+    2) built-in system fonts (rare on Streamlit Cloud)
+    3) user-uploaded font (via sidebar)
+    Returns (family_name, source_str)
+    """
+    # 1) fonts/ bundled with repo
+    fonts_dir = Path(__file__).parent / "fonts"
+    if fonts_dir.exists():
+        # prefer common Noto names first
+        preferred = [
+            "NotoSansTC-Regular.otf",
+            "NotoSansCJKtc-Regular.otf",
+            "NotoSansTC-Regular.ttf",
+            "NotoSansCJKtc-Regular.ttf",
+        ]
+        for name in preferred:
+            p = fonts_dir / name
+            if p.exists():
+                fam = use_font(str(p))
+                if fam:
+                    return fam, f"bundled: {p.name}"
+        # any .otf/.ttf
+        for p in fonts_dir.glob("*.[ot]tf"):
+            fam = use_font(str(p))
+            if fam:
+                return fam, f"bundled: {p.name}"
+
+    # 2) system fonts (unlikely on Streamlit Cloud but try)
     candidates = [
         "Microsoft JhengHei", "Microsoft YaHei",
-        "Noto Sans CJK TC", "Noto Sans CJK SC",
+        "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans CJK SC",
         "PingFang TC", "Heiti TC",
         "Arial Unicode MS", "SimHei",
         "WenQuanYi Zen Hei", "DejaVu Sans"
     ]
-    available = set(f.name for f in matplotlib.font_manager.fontManager.ttflist)
+    available = set(f.name for f in font_manager.fontManager.ttflist)
     for name in candidates:
         if name in available:
             plt.rcParams["font.sans-serif"] = [name]
             plt.rcParams["axes.unicode_minus"] = False
-            return name
-    plt.rcParams["axes.unicode_minus"] = False
-    return None
+            return name, "system"
 
-FONT_USED = setup_zh_font()
+    # 3) wait for user upload (handled in sidebar)
+    plt.rcParams["axes.unicode_minus"] = False
+    return None, None
+
+def sidebar_font_controls():
+    st.sidebar.markdown("### 字型設定（修正圖表中文顯示）")
+    st.sidebar.write(
+        "Cloud 環境通常沒有內建中文字型。請在 repo 的 **`fonts/`** 資料夾放入 "
+        "**NotoSansTC-Regular.otf**（或任何 .ttf/.otf CJK 字型），或在下方上傳臨時字型檔。"
+    )
+    uploaded = st.sidebar.file_uploader("上傳 .otf / .ttf 字型檔（此工作階段有效）", type=["otf", "ttf"])
+    if uploaded is not None:
+        tmp_path = Path("/tmp") / uploaded.name
+        tmp_path.write_bytes(uploaded.getvalue())
+        fam = use_font(str(tmp_path))
+        if fam:
+            st.sidebar.success(f"已套用字型：{fam}")
+            st.session_state["_chart_font_family"] = fam
+            st.experimental_rerun()
+        else:
+            st.sidebar.error("字型載入失敗，請換一個檔案試試。")
+
+    if "_chart_font_family" in st.session_state:
+        st.sidebar.caption(f"目前字型：{st.session_state['_chart_font_family']}")
+
+def parse_ts(s):
+    for fmt in ("%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            continue
+    return pd.to_datetime(s, errors="coerce")
 
 @st.cache_data(show_spinner=False)
 def parse_file(file_bytes: bytes, filename_hint: str):
-    # Read CSV/TXT with no header, then assign columns if present.
     df = pd.read_csv(io.BytesIO(file_bytes), header=None, dtype=str)
     col_count = df.shape[1]
     if col_count >= 13:
@@ -50,22 +122,12 @@ def parse_file(file_bytes: bytes, filename_hint: str):
         keep = min(col_count, len(base_cols))
         df = df.iloc[:, :keep]
         df.columns = base_cols[:keep]
-
-    def parse_ts(s):
-        for fmt in ("%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-            try:
-                return datetime.strptime(s, fmt)
-            except Exception:
-                continue
-        return pd.to_datetime(s, errors="coerce")
-
     df["Timestamp"] = df["Timestamp"].apply(parse_ts)
     df = df.dropna(subset=["Timestamp"]).copy()
     df["Minute"] = df["Timestamp"].dt.floor("min")
     return df
 
 def fig_to_bytes(fig):
-    import io
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
     plt.close(fig)
@@ -76,11 +138,19 @@ def section_header(title):
     st.markdown(f"### {title}")
 
 def main():
+    # Font handling
+    if "_chart_font_family" not in st.session_state:
+        fam, src = load_cjk_font()
+        if fam:
+            st.session_state["_chart_font_family"] = fam
+    sidebar_font_controls()
+
     st.markdown(f"# {APP_TITLE}")
-    if FONT_USED:
-        st.caption(f"字型：{FONT_USED}")
+    fam = st.session_state.get("_chart_font_family")
+    if fam:
+        st.caption(f"圖表字型：{fam}")
     else:
-        st.caption("⚠️ 未偵測到常見中文字型，若圖中文顯示異常，請在系統安裝中文字型（例如 Microsoft JhengHei / Noto Sans CJK）。")
+        st.warning("尚未偵測到中文字型。請在 repo 的 `fonts/` 放 `NotoSansTC-Regular.otf`，或在左側上傳一個 .otf/.ttf 字型檔。")
 
     uploaded = st.file_uploader("上傳 WarningsLog.txt / CSV / TXT（無表頭）", type=["txt", "csv"])
     if not uploaded:
